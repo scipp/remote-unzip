@@ -1,5 +1,5 @@
 import { ZipReader, HttpRangeReader, TextWriter } from "https://deno.land/x/zipjs@v2.7.24/index.js";
-import { mime, mimelite } from "https://raw.githubusercontent.com/Tyrenn/mimetypes/refs/heads/main/src/mime.ts";
+import * as mime from "npm:mime-types";
 
 const token = Deno.env.get("GITHUB_TOKEN_NOPERMISSIONS");
 console.log("Found token:", !!token)
@@ -55,7 +55,7 @@ Deno.serve(async (req) => {
   const stream = new TransformStream();
   targetEntry.getData(stream);
 
-  const ext = mime.getType(target_file.split('.').slice(-1)[0]);
+  const ext = mime.contentType(target_file.split('.').slice(-1)[0]);
 
   return new Response(
       stream.readable,

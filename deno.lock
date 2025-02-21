@@ -1,5 +1,19 @@
 {
   "version": "4",
+  "specifiers": {
+    "npm:mime-types@*": "2.1.35"
+  },
+  "npm": {
+    "mime-db@1.52.0": {
+      "integrity": "sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg=="
+    },
+    "mime-types@2.1.35": {
+      "integrity": "sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw==",
+      "dependencies": [
+        "mime-db"
+      ]
+    }
+  },
   "redirects": {
     "https://deno.land/x/zipjs/index.js": "https://deno.land/x/zipjs@v2.7.57/index.js"
   },
