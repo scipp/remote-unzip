@@ -10,7 +10,7 @@ const zipReaderMap = new Map();
 Deno.serve(async (req) => {
   const url = new URL(req.url);
 
-  const groups = url.pathname.match(/\/([^\/]*)\/([^\/]*)\/.*\/artifacts\/(\d{10})\/?(.*)/);
+  const groups = url.pathname.match(/\/([^\/]*)\/([^\/]*)\/.*artifacts\/(\d{10})\/?(.*)/);
   if (groups == null) {
       return new Response("No artifact path provided. Provide a valid github artifact url.", { status: 404 });
   }
