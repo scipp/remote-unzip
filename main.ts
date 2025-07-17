@@ -43,31 +43,33 @@ Deno.serve(async (req) => {
           const branch = groups[3];
           console.log({owner, repo, branch});
           target_file = groups[4];
-          const key = [owner, repo, branch].join('/');
-          for (let ntry=0; ntry < 3; ntry++) {
-              try {
-                  if (!latest_docs_cache.has(key)) {
-                      console.log("Querying github for latest docs build");
-                      const latest_artifact_url = (await (await fetch(
-                          `https://api.github.com/repos/${owner}/${repo}/actions/runs?branch=${branch}&per_page=1`,
-                          opts,
-                      )).json()).workflow_runs[0].artifacts_url;
-                      latest_docs_cache.set(
-                          key,
-                          (await (await fetch(
-                              latest_artifact_url,
-                              opts,
-                          )).json()).artifacts[0].archive_download_url
-                      );
-                      console.log('Cache state after update:', latest_docs_cache);
+          try {
+              for (let page=0; page < 5; page++) {
+                  const artifacts = (await (await fetch(
+                      `https://api.github.com/repos/${owner}/${repo}/actions/artifacts?name=docs_html&page=${page}`,
+                      opts,
+                  )).json()).artifacts;
+                  for (const artifact of artifacts) {
+                      if (artifact.workflow_run.head_branch == branch) {
+                          console.log(
+                              'Redirecting to',
+                              `${url.origin}/${owner}/${repo}/actions/artifacts/${artifact.id}/${target_file}`,
+                          );
+                          return Response.redirect(
+                              `${url.origin}/${owner}/${repo}/actions/artifacts/${artifact.id}/${target_file}`,
+                               302,
+                          );
+                      }
                   }
-              } catch (e) {
-                  console.log("Error when fetching latest artifact from branch ", e);
-                  continue
               }
-              remote_url = latest_docs_cache.get(key);
-              cache_control = "max-age=300"
-              break;
+              return new Response(
+                  "No recent docs artifact found on that branch", { status: 404 }
+              );
+          } catch (e) {
+              console.log("Error when fetching latest docs from branch ", e);
+              return new Response(
+                  "Failed to fetch latest docs from branch", { status: 500 }
+              );
           }
       }
   }
