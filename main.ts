@@ -6,12 +6,6 @@ console.log("Found token:", !!token)
 
 const zipReaderMap = new Map();
 
-const latest_docs_cache = new Map();
-const clear_cache = setInterval(
-    () => latest_docs_cache.clear(),
-    60 * 1000,
-);
-
 Deno.serve(async (req) => {
   const url = new URL(req.url);
 
