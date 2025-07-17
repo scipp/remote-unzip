@@ -38,7 +38,7 @@ Deno.serve(async (req) => {
           console.log({owner, repo, branch});
           target_file = groups[4];
           try {
-              for (let page=0; page < 5; page++) {
+              for (let page=1; page < 6; page++) {
                   const artifacts = (await (await fetch(
                       `https://api.github.com/repos/${owner}/${repo}/actions/artifacts?name=docs_html&page=${page}`,
                       opts,
