@@ -38,26 +38,43 @@ Deno.serve(async (req) => {
           console.log({owner, repo, branch});
           target_file = groups[4];
           try {
-              for (let page=1; page < 6; page++) {
-                  const artifacts = (await (await fetch(
-                      `https://api.github.com/repos/${owner}/${repo}/actions/artifacts?name=docs_html&page=${page}`,
+              // Retreive relatively few per page - hopefully we won't need to fetch many anyway, so it won't increase latency much.
+              const per_page = 10;
+              // Retreive runs on branch.
+              // For each run, retreive the first artifact that has "docs_html" name.
+              // Retreive artifacts until we find the latest on branch.
+              // Assume that one of the first per_page * 10 workflow runs has a docs build.
+              for (let page=1; page < 10; page++) {
+                  const runs = (await (await fetch(
+                      `https://api.github.com/repos/${owner}/${repo}/actions/runs?branch=${branch}&page=${page}&per_page=${per_page}`,
                       opts,
-                  )).json()).artifacts;
-                  for (const artifact of artifacts) {
-                      if (artifact.workflow_run.head_branch == branch) {
-                          console.log(
-                              'Redirecting to',
-                              `${url.origin}/${owner}/${repo}/actions/artifacts/${artifact.id}/${target_file}`,
-                          );
-                          return Response.redirect(
-                              `${url.origin}/${owner}/${repo}/actions/artifacts/${artifact.id}/${target_file}`,
-                               302,
-                          );
+                  )).json()).workflow_runs;
+                  for (const run of runs) {
+                      const artifact_names = repo === 'scipp' ? ['docs_html', 'html', 'DocumentationHTML'] : ['docs_html'];
+                      for (const artifact_name of artifact_names) {
+                          const artifacts = (await (await fetch(
+                              `https://api.github.com/repos/${owner}/${repo}/actions/runs/${run.id}/artifacts?name=${artifact_name}&per_page=1`,
+                              opts,
+                          )).json()).artifacts;
+                          if (artifacts.length != 0) {
+                              console.log(
+                                  'Redirecting to',
+                                  `${url.origin}/${owner}/${repo}/actions/artifacts/${artifacts[0].id}/${target_file}`,
+                              );
+                              return Response.redirect(
+                                  `${url.origin}/${owner}/${repo}/actions/artifacts/${artifacts[0].id}/${target_file}`,
+                                   302,
+                              );
+                          }
                       }
+                  }
+                  if (runs.length < per_page) {
+                      // Retreived fewer than requested, we reached the end of the list.
+                      break;
                   }
               }
               return new Response(
-                  "No recent docs artifact found on that branch", { status: 404 }
+                  "No docs artifact was found on that branch", { status: 404 }
               );
           } catch (e) {
               console.log("Error when fetching latest docs from branch ", e);
