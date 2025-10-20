@@ -40,9 +40,7 @@ Deno.serve(async (req) => {
           try {
               // Retreive relatively few per page - hopefully we won't need to fetch many anyway, so it won't increase latency much.
               const per_page = 10;
-              // Retreive runs on branch.
-              // For each run, retreive the first artifact that has "docs_html" name.
-              // Retreive artifacts until we find the latest on branch.
+              // Retreive runs on branch, for each run, retreive the first artifact that has "docs_html" name.
               // Assume that one of the first per_page * 10 workflow runs has a docs build.
               for (let page=1; page < 10; page++) {
                   const runs = (await (await fetch(
