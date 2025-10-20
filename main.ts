@@ -59,20 +59,22 @@ Deno.serve(async (req) => {
                   `https://api.github.com/repos/${owner}/${repo}/releases/tags/${tag}`,
                   opts,
               )).json());
-              const assets = await (await fetch(release.assets_url)).json();
-              for (const asset of assets) {
-                  if (asset.name.match(/documentation.*/)) {
-                      if (target_file == '') {
-                          target_file = `documentation-${tag}/index.html`;
+              if (release.assets_url) {
+                  const assets = await (await fetch(release.assets_url)).json();
+                  for (const asset of assets) {
+                      if (asset.name.match(/documentation.*/)) {
+                          if (target_file == '') {
+                              target_file = `documentation-${tag}/index.html`;
+                          }
+                          console.log(
+                              'Redirecting to',
+                              `${url.origin}/${owner}/${repo}/assets/${asset.id}/${target_file}`,
+                          );
+                          return Response.redirect(
+                              `${url.origin}/${owner}/${repo}/assets/${asset.id}/${target_file}`,
+                               302,
+                          );
                       }
-                      console.log(
-                          'Redirecting to',
-                          `${url.origin}/${owner}/${repo}/assets/${asset.id}/${target_file}`,
-                      );
-                      return Response.redirect(
-                          `${url.origin}/${owner}/${repo}/assets/${asset.id}/${target_file}`,
-                           302,
-                      );
                   }
               }
           }
