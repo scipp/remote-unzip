@@ -90,7 +90,11 @@ Deno.serve(async (req) => {
                           opts,
                       )).json()).workflow_runs;
                       for (const run of runs) {
-                          const artifact_names = repo === 'scipp' ? ['docs_html', 'html', 'DocumentationHTML'] : ['docs_html'];
+                          const artifact_names = (
+                              url.searchParams.has('artifact_name') ?
+                              url.searchParams.get('artifact_name').split(',') :
+                              (repo === 'scipp' ? ['docs_html', 'html', 'DocumentationHTML'] : ['docs_html'])
+                          );
                           for (const artifact_name of artifact_names) {
                               const artifacts = (await (await fetch(
                                   `https://api.github.com/repos/${owner}/${repo}/actions/runs/${run.id}/artifacts?name=${artifact_name}&per_page=1`,
