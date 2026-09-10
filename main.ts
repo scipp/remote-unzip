@@ -1,170 +1,219 @@
-import { ZipReader, HttpRangeReader, TextWriter } from "https://deno.land/x/zipjs@v2.7.24/index.js";
-import * as mime from "npm:mime-types";
+import { type Entry, HttpRangeReader, ZipReader } from "zipjs";
+import * as mime from "mime-types";
 
 const token = Deno.env.get("GITHUB_TOKEN_NOPERMISSIONS");
-console.log("Found token:", !!token)
+const zipReaders = new Map<string, ZipReader<Uint8Array>>();
 
-const zipReaderMap = new Map();
-
-Deno.serve(async (req) => {
-  const url = new URL(req.url);
-
-  const opts = {
-    headers: {
-      Authorization: `token ${token}`,
-    },
-  };
-
-  let remote_url, target_file = '', cache_control = "max-age=31536000";
-
-  // Look for url like org/repo/artifacts/xxxxx/file
-  const groups = url.pathname.match(/\/([^\/]*)\/([^\/]*)\/.*artifacts\/(\d{10})\/?(.*)/);
-  if (groups !== null) {
-      const owner = groups[1];
-      const repo = groups[2];
-      const artifact = groups[3];
-      console.log({owner, repo, artifact});
-      target_file = groups[4];
-      remote_url = `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${artifact}/zip`
+async function githubJson(
+  url: string,
+  opts: RequestInit,
+  allowMissing = false,
+) {
+  const response = await fetch(url, opts);
+  if (!response.ok) {
+    await response.body?.cancel();
+    if (allowMissing && response.status === 404) return null;
+    throw new Error(`GitHub returned HTTP ${response.status}`);
   }
-  // If not found, look for url like org/repo/assets/xxxxx/file
-  if (remote_url === undefined) {
-      const groups = url.pathname.match(/\/([^\/]*)\/([^\/]*)\/.*assets\/(\d{9})\/?(.*)/);
-      if (groups !== null) {
-          const owner = groups[1];
-          const repo = groups[2];
-          const asset = groups[3];
-          console.log({owner, repo, asset});
-          target_file = groups[4];
-          remote_url = `https://api.github.com/repos/${owner}/${repo}/releases/assets/${asset}`;
-          opts.headers['Accept'] = 'application/octet-stream';
-          opts.redirect = 'follow';
-      }
-  }
-  // If not found, look for url like org/repo/branch/file
-  // If it matches, find the latest action run in the repo on the branch and use its first artifact
-  if (remote_url === undefined) {
-      const groups = url.pathname.match(/\/([^\/]*)\/([^\/]*)\/([^\/]*)\/?(.*)/);
-      if (groups !== null) {
-          const owner = groups[1];
-          const repo = groups[2];
-          const branch = groups[3];
-          console.log({owner, repo, branch});
-          target_file = groups[4];
+  return response.json();
+}
 
-          if (branch.match(/^v?[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$/)) {
-              // branch is a release tag name - fetch from release assets
-              const tag = branch[0] == 'v' ? branch.slice(1) : branch;
-              const release = (await (await fetch(
-                  `https://api.github.com/repos/${owner}/${repo}/releases/tags/${tag}`,
-                  opts,
-              )).json());
-              if (release.assets_url) {
-                  const assets = await (await fetch(release.assets_url)).json();
-                  for (const asset of assets) {
-                      if (asset.name.match(/documentation.*/)) {
-                          if (target_file == '') {
-                              target_file = `documentation-${tag}/index.html`;
-                          }
-                          console.log(
-                              'Redirecting to',
-                              `${url.origin}/${owner}/${repo}/assets/${asset.id}/${target_file}`,
-                          );
-                          return Response.redirect(
-                              `${url.origin}/${owner}/${repo}/assets/${asset.id}/${target_file}`,
-                               302,
-                          );
-                      }
-                  }
-              }
-          }
-          else {
-              try {
-                  // Retreive relatively few per page - hopefully we won't need to fetch many anyway, so it won't increase latency much.
-                  const per_page = 10;
-                  // Retreive runs on branch, for each run, retreive the first artifact that has "docs_html" name.
-                  // Assume that one of the first per_page * 10 workflow runs has a docs build.
-                  for (let page=1; page < 10; page++) {
-                      const runs = (await (await fetch(
-                          `https://api.github.com/repos/${owner}/${repo}/actions/runs?branch=${branch}&page=${page}&per_page=${per_page}`,
-                          opts,
-                      )).json()).workflow_runs;
-                      for (const run of runs) {
-                          const artifact_names = (
-                              url.searchParams.has('artifact_name') ?
-                              url.searchParams.get('artifact_name').split(',') :
-                              (repo === 'scipp' ? ['docs_html', 'html', 'DocumentationHTML'] : ['docs_html'])
-                          );
-                          for (const artifact_name of artifact_names) {
-                              const artifacts = (await (await fetch(
-                                  `https://api.github.com/repos/${owner}/${repo}/actions/runs/${run.id}/artifacts?name=${artifact_name}&per_page=1`,
-                                  opts,
-                              )).json()).artifacts;
-                              if (artifacts.length != 0) {
-                                  console.log(
-                                      'Redirecting to',
-                                      `${url.origin}/${owner}/${repo}/actions/artifacts/${artifacts[0].id}/${target_file}`,
-                                  );
-                                  return Response.redirect(
-                                      `${url.origin}/${owner}/${repo}/actions/artifacts/${artifacts[0].id}/${target_file}`,
-                                       302,
-                                  );
-                              }
-                          }
-                      }
-                      if (runs.length < per_page) {
-                          // Retreived fewer than requested, we reached the end of the list.
-                          break;
-                      }
-                  }
-                  return new Response(
-                      "No docs artifact was found on that branch", { status: 404 }
-                  );
-              } catch (e) {
-                  console.log("Error when fetching latest docs from branch ", e);
-                  return new Response(
-                      "Failed to fetch latest docs from branch", { status: 500 }
-                  );
-              }
-          }
-      }
+function getArtifactNames(url: URL, repo: string): string[] {
+  const names = url.searchParams.getAll("artifact_name")
+    .flatMap((value) => value.split(","))
+    .filter(Boolean);
+  if (names.length) return names;
+  return repo.toLowerCase() === "scipp"
+    ? ["docs_html", "html", "DocumentationHTML"]
+    : ["docs_html"];
+}
+
+async function redirectToRef(url: URL, opts: RequestInit): Promise<Response> {
+  const match = url.pathname.match(/^\/([^/]+)\/([^/]+)\/([^/]+)(?:\/(.*))?$/);
+  if (!match) {
+    return new Response(
+      "Provide a valid GitHub artifact, asset, branch or tag URL",
+      { status: 404 },
+    );
   }
-  if (remote_url === undefined) {
-      return new Response(
-          "No artifact path provided. Provide a valid github artifact url.", { status: 404 }
+
+  const [, owner, repo, ref, targetFile = ""] = match;
+  let encodedRef: string;
+  try {
+    encodedRef = encodeURIComponent(decodeURIComponent(ref));
+  } catch {
+    return new Response("Invalid branch or tag encoding", { status: 400 });
+  }
+
+  const api = `https://api.github.com/repos/${owner}/${repo}`;
+  try {
+    if (
+      await githubJson(
+        `${api}/git/ref/tags/${encodedRef}`,
+        opts,
+        true,
+      )
+    ) {
+      const release = await githubJson(
+        `${api}/releases/tags/${encodedRef}`,
+        opts,
+        true,
       );
-  }
-  if (target_file == '') {
-      target_file = 'index.html';
-
-      if (req.url.slice(-1) !== '/') {
-          return Response.redirect(req.url + '/');
+      if (!release) {
+        return new Response("No release was found for that tag", {
+          status: 404,
+        });
       }
-  }
-  console.log(remote_url, target_file);
-  
-  if (!zipReaderMap.has(remote_url)) {
-      const httpReader = new HttpRangeReader(remote_url, opts);
-      zipReaderMap.set(remote_url, new ZipReader(httpReader));
-  }
-  const zipReader = zipReaderMap.get(remote_url);
-  const entries = await zipReader.getEntries().catch(err => {console.error(err); return [];});
-  const targetEntry = entries.find((entry) => entry.filename === target_file);
+      const { assets }: { assets: { id: number; name: string }[] } = release;
+      const asset = assets.find((asset) =>
+        asset.name.startsWith("documentation") && asset.name.endsWith(".zip")
+      );
+      if (!asset) {
+        return new Response(
+          "No documentation ZIP was found on that release",
+          { status: 404 },
+        );
+      }
 
-  if (!targetEntry) {
-    console.error(`File "${target_file}" not found in ZIP archive.`);
+      // Default to the archive's base directory when no file was specified.
+      const file = targetFile ||
+        `${encodeURIComponent(asset.name.slice(0, -4))}/index.html`;
+      return Response.redirect(
+        `${url.origin}/${owner}/${repo}/assets/${asset.id}/${file}`,
+      );
+    }
+
+    if (
+      !await githubJson(
+        `${api}/git/ref/heads/${encodedRef}`,
+        opts,
+        true,
+      )
+    ) {
+      return new Response("No tag or branch was found with that name", {
+        status: 404,
+      });
+    }
+
+    const artifactNames = getArtifactNames(url, repo);
+    const perPage = 10;
+    // Search up to nine pages, stopping as soon as a matching artifact is found.
+    for (let page = 1; page < 10; page++) {
+      const { workflow_runs: runs } = await githubJson(
+        `${api}/actions/runs?branch=${encodedRef}&page=${page}&per_page=${perPage}`,
+        opts,
+      );
+      for (const run of runs) {
+        for (const name of artifactNames) {
+          const { artifacts } = await githubJson(
+            `${api}/actions/runs/${run.id}/artifacts?name=${
+              encodeURIComponent(name)
+            }&per_page=1`,
+            opts,
+          );
+          if (artifacts.length > 0) {
+            return Response.redirect(
+              `${url.origin}/${owner}/${repo}/actions/artifacts/${
+                artifacts[0].id
+              }/${targetFile}`,
+            );
+          }
+        }
+      }
+      if (runs.length < perPage) break;
+    }
+    return new Response("No docs artifact was found on that branch", {
+      status: 404,
+    });
+  } catch (error) {
+    console.error("Failed to fetch documentation from GitHub", error);
+    return new Response("Failed to fetch documentation from GitHub", {
+      status: 502,
+    });
+  }
+}
+
+export async function handleRequest(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const opts = { headers: new Headers() };
+  if (token) opts.headers.set("Authorization", `token ${token}`);
+
+  const artifact = url.pathname.match(
+    /^\/([^/]+)\/([^/]+)\/(?:actions\/(?:runs\/\d+\/)?)?artifacts\/(\d+)(?:\/(.*))?$/,
+  );
+  const asset = url.pathname.match(
+    /^\/([^/]+)\/([^/]+)\/(?:releases\/)?assets\/(\d+)(?:\/(.*))?$/,
+  );
+  const archive = artifact ?? asset;
+  if (!archive) return redirectToRef(url, opts);
+
+  const [, owner, repo, id, file = ""] = archive;
+  const remoteUrl = artifact
+    ? `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${id}/zip`
+    : `https://api.github.com/repos/${owner}/${repo}/releases/assets/${id}`;
+  if (asset) opts.headers.set("Accept", "application/octet-stream");
+
+  if (!file && !url.pathname.endsWith("/")) {
+    url.pathname += "/";
+    return Response.redirect(url.href);
+  }
+
+  let targetFile: string;
+  try {
+    targetFile = decodeURIComponent(file);
+    if (!targetFile || targetFile.endsWith("/")) targetFile += "index.html";
+  } catch {
+    return new Response("Invalid file path encoding", { status: 400 });
+  }
+
+  let zipReader = zipReaders.get(remoteUrl);
+  if (!zipReader) {
+    zipReader = new ZipReader(new HttpRangeReader(remoteUrl, opts));
+    zipReaders.set(remoteUrl, zipReader);
+  }
+  let entries: Entry[];
+  try {
+    entries = await zipReader.getEntries();
+  } catch (error) {
+    console.error(error);
+    return new Response("Failed to read ZIP archive", { status: 502 });
+  }
+  const targetEntry = entries.find((entry) =>
+    !entry.directory && entry.filename === targetFile
+  );
+  if (!targetEntry?.getData) {
+    if (
+      !url.pathname.endsWith("/") &&
+      entries.some((entry) =>
+        !entry.directory && entry.filename === `${targetFile}/index.html`
+      )
+    ) {
+      url.pathname += "/";
+      return Response.redirect(url.href);
+    }
     return new Response("File not found", { status: 404 });
   }
 
-  console.log(`Found "${target_file}" in ZIP archive. Streaming...`);
+  let controller: TransformStreamDefaultController<Uint8Array>;
+  const stream = new TransformStream<Uint8Array, Uint8Array>({
+    start(streamController) {
+      controller = streamController;
+    },
+  });
+  // zip.js may close its writer on failure, so only close after successful extraction.
+  targetEntry.getData(stream, { preventClose: true })
+    .then(() => stream.writable.close())
+    .catch((error: unknown) => {
+      console.error("Stream was interrupted", error);
+      controller.error(error);
+    });
+  return new Response(stream.readable, {
+    headers: {
+      "Content-Type": mime.contentType(mime.lookup(targetFile)) ||
+        "application/octet-stream",
+      "Cache-Control": "max-age=31536000",
+    },
+  });
+}
 
-  const stream = new TransformStream();
-  targetEntry.getData(stream).catch(err => console.log("Stream was interruped", err));
-
-  const ext = mime.contentType(target_file.split('.').slice(-1)[0]);
-
-  return new Response(
-      stream.readable,
-      { headers: { "Content-Type": ext, "Cache-Control": cache_control}}
-  );
-});
+if (import.meta.main) Deno.serve(handleRequest);
