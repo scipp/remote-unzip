@@ -51,3 +51,11 @@ If extraction fails after the streaming response starts, the response body
 fails.
 
 Run the tests with `deno test --allow-env=GITHUB_TOKEN_NOPERMISSIONS`.
+
+The parsed file index is cached for up to 10 ZIP archives per running instance,
+shared across Actions artifacts and release assets. Concurrent requests share
+the same pending index load. Cache hits refresh the archive's position; adding
+an 11th archive evicts the least recently used one, including pending loads.
+Failed loads are removed so later requests can retry. Eviction does not
+interrupt responses already using the archive. File contents are still fetched
+and extracted for each response.

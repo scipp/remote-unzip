@@ -2,7 +2,44 @@ import { type Entry, HttpRangeReader, ZipReader } from "zipjs";
 import * as mime from "mime-types";
 
 const token = Deno.env.get("GITHUB_TOKEN_NOPERMISSIONS");
-const zipReaders = new Map<string, ZipReader<Uint8Array>>();
+const maxCachedArchives = 10;
+const archiveEntries = new Map<string, Promise<Map<string, Entry>>>();
+
+async function readArchiveEntries(
+  remoteUrl: string,
+  headers: Headers,
+): Promise<Map<string, Entry>> {
+  const reader = new ZipReader(new HttpRangeReader(remoteUrl, { headers }));
+  const files = new Map<string, Entry>();
+  for await (const entry of reader.getEntriesGenerator()) {
+    if (!entry.directory && !files.has(entry.filename)) {
+      files.set(entry.filename, entry);
+    }
+  }
+  return files;
+}
+
+function getArchiveEntries(
+  remoteUrl: string,
+  headers: Headers,
+): Promise<Map<string, Entry>> {
+  const pending = archiveEntries.get(remoteUrl) ??
+    readArchiveEntries(remoteUrl, headers).catch((error: unknown) => {
+      // Delete only the load that failed.
+      if (archiveEntries.get(remoteUrl) === pending) {
+        archiveEntries.delete(remoteUrl);
+      }
+      throw error;
+    });
+
+  // Reinsert on every access to keep the least recently used archive first.
+  archiveEntries.delete(remoteUrl);
+  archiveEntries.set(remoteUrl, pending);
+  if (archiveEntries.size > maxCachedArchives) {
+    archiveEntries.delete(archiveEntries.keys().next().value!);
+  }
+  return pending;
+}
 
 async function githubJson(
   url: string,
@@ -166,27 +203,18 @@ export async function handleRequest(req: Request): Promise<Response> {
     return new Response("Invalid file path encoding", { status: 400 });
   }
 
-  let zipReader = zipReaders.get(remoteUrl);
-  if (!zipReader) {
-    zipReader = new ZipReader(new HttpRangeReader(remoteUrl, opts));
-    zipReaders.set(remoteUrl, zipReader);
-  }
-  let entries: Entry[];
+  let entries: Map<string, Entry>;
   try {
-    entries = await zipReader.getEntries();
+    entries = await getArchiveEntries(remoteUrl, opts.headers);
   } catch (error) {
     console.error(error);
     return new Response("Failed to read ZIP archive", { status: 502 });
   }
-  const targetEntry = entries.find((entry) =>
-    !entry.directory && entry.filename === targetFile
-  );
+  const targetEntry = entries.get(targetFile);
   if (!targetEntry?.getData) {
     if (
       !url.pathname.endsWith("/") &&
-      entries.some((entry) =>
-        !entry.directory && entry.filename === `${targetFile}/index.html`
-      )
+      entries.has(`${targetFile}/index.html`)
     ) {
       url.pathname += "/";
       return Response.redirect(url.href);

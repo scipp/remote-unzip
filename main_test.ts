@@ -711,3 +711,168 @@ Deno.test("compressed archives stream successfully with ZIP workers enabled", as
     configure({ useWebWorkers: false });
   }
 });
+
+function directoryReads(calls: Request[], zip: Uint8Array<ArrayBuffer>) {
+  const footer = new DataView(zip.buffer, zip.byteOffset + zip.length - 22);
+  const start = footer.getUint32(16, true);
+  const end = start + footer.getUint32(12, true) - 1;
+  return calls.filter((req) =>
+    req.headers.get("range") === `bytes=${start}-${end}`
+  );
+}
+
+Deno.test("archive entries are reused across files, aliases, redirects and misses", async () => {
+  const zip = await makeZip({
+    "index.html": "Home",
+    "styles.css": "body { color: blue; }",
+    "guide/index.html": "Guide",
+  });
+  const path = "/scipp/ess/artifacts/81000000001";
+  await withFetch((req) => zipResponse(req, zip), async (calls) => {
+    assertEquals(await (await request(`${path}/`)).text(), "Home");
+    assertEquals(
+      await (await request(
+        "/scipp/ess/actions/runs/42/artifacts/81000000001/styles.css",
+      )).text(),
+      "body { color: blue; }",
+    );
+    assertRedirect(await request(`${path}/guide`), `${path}/guide/`);
+    assertEquals(await (await request(`${path}/guide/`)).text(), "Guide");
+    assertEquals((await request(`${path}/missing.html`)).status, 404);
+    assertEquals(directoryReads(calls, zip).length, 1);
+    assertEquals(
+      calls.filter((req) => req.headers.get("range") === "bytes=0-0").length,
+      1,
+    );
+  });
+});
+
+Deno.test("concurrent requests share entries and independently stream the same file", async (t) => {
+  const files = {
+    "index.html": "Documentation".repeat(10000),
+    "guide.html": "Another page".repeat(20000),
+  };
+  const zip = await makeZip(files, 6);
+  for (const useWebWorkers of [false, true]) {
+    await t.step(`workers: ${useWebWorkers}`, async () => {
+      configure({ useWebWorkers });
+      try {
+        await withFetch((req) => zipResponse(req, zip), async (calls) => {
+          const path = `/scipp/ess/artifacts/${
+            82000000000 + Number(useWebWorkers)
+          }`;
+          for (let batch = 0; batch < 2; batch++) {
+            await Promise.all(Array.from({ length: 12 }, async (_, i) => {
+              const name = i % 2 ? "index.html" : "guide.html";
+              assertEquals(
+                await (await request(`${path}/${name}`)).text(),
+                files[name],
+              );
+            }));
+          }
+          assertEquals(directoryReads(calls, zip).length, 1);
+          assertEquals(
+            calls.filter((req) => req.headers.get("range") === "bytes=0-0")
+              .length,
+            1,
+          );
+        });
+      } finally {
+        terminateWorkers();
+        configure({ useWebWorkers: false });
+      }
+    });
+  }
+});
+
+Deno.test("ten archives are retained and hits protect the least recently used archive", async () => {
+  const zip = await makeZip({ "index.html": "Documentation" });
+  const path = (i: number) =>
+    `/scipp/ess/${i % 2 ? "assets" : "artifacts"}/${83000000000 + i}/`;
+  await withFetch((req) => zipResponse(req, zip), async (calls) => {
+    const read = async (i: number) => {
+      const start = calls.length;
+      assertEquals(await (await request(path(i))).text(), "Documentation");
+      return directoryReads(calls.slice(start), zip).length;
+    };
+    for (let i = 0; i < 10; i++) assertEquals(await read(i), 1);
+    assertEquals(await read(0), 0);
+    assertEquals(await read(10), 1);
+    for (const i of [0, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+      assertEquals(await read(i), 0);
+    }
+    assertEquals(await read(1), 1);
+  });
+});
+
+Deno.test("eviction does not interrupt a response using an archive", async () => {
+  const contents = "Documentation".repeat(100000);
+  const zip = await makeZip({ "index.html": contents });
+  await withFetch((req) => zipResponse(req, zip), async () => {
+    const response = await request(
+      "/scipp/ess/artifacts/84000000000/index.html",
+    );
+    for (let i = 1; i <= 10; i++) {
+      assertEquals(
+        (await request(`/scipp/ess/artifacts/${84000000000 + i}/missing`))
+          .status,
+        404,
+      );
+    }
+    assertEquals(await response.text(), contents);
+  });
+});
+
+Deno.test("a failed shared archive load can be retried", async () => {
+  const zip = await makeZip({ "index.html": "Recovered" });
+  let fail = true;
+  await withFetch(
+    (req) => fail ? new Response(null, { status: 500 }) : zipResponse(req, zip),
+    async (calls) => {
+      const path = "/scipp/ess/artifacts/85000000000/index.html";
+      const responses = await Promise.all([request(path), request(path)]);
+      assertEquals(responses.map((response) => response.status), [502, 502]);
+      assertEquals(calls.length, 1);
+      fail = false;
+      assertEquals(await (await request(path)).text(), "Recovered");
+      assertEquals(await (await request(path)).text(), "Recovered");
+      assertEquals(directoryReads(calls, zip).length, 1);
+    },
+  );
+});
+
+Deno.test("failure of an evicted pending load preserves its replacement", async () => {
+  const zip = await makeZip({ "index.html": "Documentation" });
+  const blocked = Promise.withResolvers<Response>();
+  const firstFetch = Promise.withResolvers<void>();
+  const archiveUrl = `${api}/actions/artifacts/86000000000/zip`;
+  let first = true;
+  await withFetch((req) => {
+    if (req.url === archiveUrl && first) {
+      first = false;
+      firstFetch.resolve();
+      return blocked.promise;
+    }
+    return zipResponse(req, zip);
+  }, async (calls) => {
+    const path = "/scipp/ess/artifacts/86000000000/missing";
+    const old = request(path);
+    try {
+      await firstFetch.promise;
+      for (let i = 1; i <= 10; i++) {
+        assertEquals(
+          (await request(`/scipp/ess/artifacts/${86000000000 + i}/missing`))
+            .status,
+          404,
+        );
+      }
+      assertEquals((await request(path)).status, 404);
+    } finally {
+      blocked.resolve(new Response(null, { status: 500 }));
+    }
+    assertEquals((await old).status, 502);
+    const start = calls.length;
+    assertEquals((await request(path)).status, 404);
+    assertEquals(calls.length, start);
+  });
+});
