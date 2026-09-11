@@ -3,14 +3,15 @@
     "dev": "deno run --watch main.ts"
   },
   "imports": {
-    "@std/assert": "jsr:@std/assert@1"
+    "@std/assert": "jsr:@std/assert@1",
+    "mime-types": "npm:mime-types@2.1.35",
+    "zipjs": "https://deno.land/x/zipjs@v2.7.24/index.js"
   },
   "deploy": {
-    "project": "1b96dd12-3b80-4ee7-907e-7b1274efe183",
-    "exclude": [
-      "**/node_modules"
-    ],
-    "include": [],
-    "entrypoint": "main.ts"
+    "org": "scipp",
+    "app": "remote-unzip",
+    "runtime": {
+      "entrypoint": "main.ts"
+    }
   }
 }
